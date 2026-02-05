@@ -40,6 +40,51 @@ THE SOFTWARE.
 #import "icalBuddyFunctions.h" // today, now
 #import "ABRecord+HGAdditions.h"
 
+#ifndef USE_MOCKED_CALENDARSTORE
+// Helper to get calendar color as NSColor (EventKit returns CGColor)
+static NSColor* getCalendarColor(EKCalendar *calendar)
+{
+    if (calendar == nil)
+        return nil;
+    if (@available(macOS 10.15, *)) {
+        CGColorRef cgColor = [calendar CGColor];
+        if (cgColor == NULL)
+            return nil;
+        return [NSColor colorWithCGColor:cgColor];
+    }
+    // Fallback for older macOS: no color support
+    return nil;
+}
+
+// Helper to check if calendar is a birthday calendar
+static BOOL isBirthdayCalendar(EKCalendar *calendar)
+{
+    return (calendar != nil && [calendar type] == EKCalendarTypeBirthday);
+}
+
+// Helper to get NSDate from EKReminder's dueDateComponents
+static NSDate* getTaskDueDate(EKReminder *reminder)
+{
+    if (reminder == nil || [reminder dueDateComponents] == nil)
+        return nil;
+    return [[NSCalendar currentCalendar] dateFromComponents:[reminder dueDateComponents]];
+}
+
+// Helper to get calendar type as string for display
+static NSString* getCalendarTypeString(EKCalendar *calendar)
+{
+    if (calendar == nil)
+        return @"Unknown";
+    switch ([calendar type]) {
+        case EKCalendarTypeLocal: return @"Local";
+        case EKCalendarTypeCalDAV: return @"CalDAV";
+        case EKCalendarTypeExchange: return @"Exchange";
+        case EKCalendarTypeSubscription: return @"Subscription";
+        case EKCalendarTypeBirthday: return @"Birthday";
+        default: return @"Unknown";
+    }
+}
+#endif
 
 PrettyPrintOptions prettyPrintOptions;
 
@@ -292,7 +337,12 @@ PropertyPresentationElements *getEventTitlePresentation(CalEvent *event, CalItem
 
     NSString *thisPropTempValue = nil;
 
-    if ([[[event calendar] type] isEqualToString:CalCalendarTypeBirthday])
+#ifdef USE_MOCKED_CALENDARSTORE
+    BOOL isBirthday = [[[event calendar] type] isEqualToString:CalCalendarTypeBirthday];
+#else
+    BOOL isBirthday = isBirthdayCalendar([event calendar]);
+#endif
+    if (isBirthday)
     {
         ABAddressBook *addressBook = [ABAddressBook sharedAddressBook];
 
@@ -308,7 +358,12 @@ PropertyPresentationElements *getEventTitlePresentation(CalEvent *event, CalItem
             // so we have to use the URI to find the ABPerson from the Address Book
             // and print their name from there)
 
-            NSString *personId = [[NSString stringWithFormat:@"%@", [event url]]
+#ifdef USE_MOCKED_CALENDARSTORE
+            NSURL *eventURL = [event url];
+#else
+            NSURL *eventURL = [event URL];
+#endif
+            NSString *personId = [[NSString stringWithFormat:@"%@", eventURL]
                 stringByReplacingOccurrencesOfString:@"addressbook://"
                 withString:@""
                 ];
@@ -412,10 +467,15 @@ PropertyPresentationElements *getEventURLPresentation(CalEvent *event, CalItemPr
 
     elements.name = M_ATTR_STR(strConcat(localizedStr(kL10nKeyPropNameUrl), @":", nil));
 
-    if ([event url] != nil &&
-        ![[[event calendar] type] isEqualToString:CalCalendarTypeBirthday]
-        )
-        elements.value = M_ATTR_STR(([NSString stringWithFormat: @"%@", [event url]]));
+#ifdef USE_MOCKED_CALENDARSTORE
+    BOOL isBirthdayUrl = [[[event calendar] type] isEqualToString:CalCalendarTypeBirthday];
+    NSURL *eventURLValue = [event url];
+#else
+    BOOL isBirthdayUrl = isBirthdayCalendar([event calendar]);
+    NSURL *eventURLValue = [event URL];
+#endif
+    if (eventURLValue != nil && !isBirthdayUrl)
+        elements.value = M_ATTR_STR(([NSString stringWithFormat: @"%@", eventURLValue]));
 
     return elements;
 }
@@ -425,7 +485,11 @@ PropertyPresentationElements *getEventUIDPresentation(CalEvent *event, CalItemPr
     PropertyPresentationElements *elements = [PropertyPresentationElements new];
 
     elements.name = M_ATTR_STR(strConcat(localizedStr(kL10nKeyPropNameUID), @":", nil));
+#ifdef USE_MOCKED_CALENDARSTORE
     elements.value = M_ATTR_STR([event uid]);
+#else
+    elements.value = M_ATTR_STR([event calendarItemIdentifier]);
+#endif
 
     return elements;
 }
@@ -436,14 +500,27 @@ PropertyPresentationElements *getEventAttendeesPresentation(CalEvent *event, Cal
 
     elements.name = M_ATTR_STR(strConcat(localizedStr(kL10nKeyPropNameAttendees), @":", nil));
 
-    if ([event attendees] != nil && ![[[event calendar] type] isEqualToString:CalCalendarTypeBirthday])
+#ifdef USE_MOCKED_CALENDARSTORE
+    BOOL isBirthdayAttendees = [[[event calendar] type] isEqualToString:CalCalendarTypeBirthday];
+#else
+    BOOL isBirthdayAttendees = isBirthdayCalendar([event calendar]);
+#endif
+    if ([event attendees] != nil && !isBirthdayAttendees)
     {
         NSMutableArray *attendeeNames = [NSMutableArray array];
+#ifdef USE_MOCKED_CALENDARSTORE
         for (CalAttendee *attendee in [event attendees])
         {
             NSString *attendeeDisplayName = [attendee commonName] ?: [NSString stringWithFormat:@"%@", [attendee address]];
             [attendeeNames addObject:attendeeDisplayName];
         }
+#else
+        for (EKParticipant *attendee in [event attendees])
+        {
+            NSString *attendeeDisplayName = [attendee name] ?: [NSString stringWithFormat:@"%@", [attendee URL]];
+            [attendeeNames addObject:attendeeDisplayName];
+        }
+#endif
         if (0 < printOptions.maxNumPrintedAttendees && printOptions.maxNumPrintedAttendees < attendeeNames.count)
         {
             attendeeNames = [[attendeeNames subarrayWithRange:NSMakeRange(0, printOptions.maxNumPrintedAttendees)]
@@ -458,7 +535,12 @@ PropertyPresentationElements *getEventDatetimePresentation(CalEvent *event, CalI
 {
     PropertyPresentationElements *elements = [PropertyPresentationElements new];
 
-    if ([[[event calendar] type] isEqualToString:CalCalendarTypeBirthday])
+#ifdef USE_MOCKED_CALENDARSTORE
+    BOOL isBirthdayEvent = [[[event calendar] type] isEqualToString:CalCalendarTypeBirthday];
+#else
+    BOOL isBirthdayEvent = isBirthdayCalendar([event calendar]);
+#endif
+    if (isBirthdayEvent)
     {
         if (!printOptions.singleDay)
             elements.value = M_ATTR_STR(dateStr([event startDate], ONLY_DATE));
@@ -626,13 +708,20 @@ NSMutableAttributedString* getEventPropStr(NSString *propName, CalEvent *event, 
     if ([propName isEqualToString:kPropName_title]
         && prettyPrintOptions.useCalendarColorsForTitles
         && ![[[elements.value attributesAtIndex:0 effectiveRange:NULL] allKeys] containsObject:NSForegroundColorAttributeName]
-	&& [[event calendar] color] != nil
         )
-        [elements.value
-            addAttribute:NSForegroundColorAttributeName
-            value:getClosestAnsiColorForColor([[event calendar] color], YES)
-            range:NSMakeRange(0, [elements.value length])
-            ];
+    {
+#ifdef USE_MOCKED_CALENDARSTORE
+        NSColor *calColor = [[event calendar] color];
+#else
+        NSColor *calColor = getCalendarColor([event calendar]);
+#endif
+        if (calColor != nil)
+            [elements.value
+                addAttribute:NSForegroundColorAttributeName
+                value:getClosestAnsiColorForColor(calColor, YES)
+                range:NSMakeRange(0, [elements.value length])
+                ];
+    }
 
     if (elements.valueSuffix != nil)
         [elements.value appendAttributedString:elements.valueSuffix];
@@ -786,8 +875,13 @@ PropertyPresentationElements *getTaskURLPresentation(CalTask *task, CalItemPrint
 
     elements.name = M_ATTR_STR(strConcat(localizedStr(kL10nKeyPropNameUrl), @":", nil));
 
-    if ([task url] != nil)
-        elements.value = M_ATTR_STR(([NSString stringWithFormat:@"%@", [task url]]));
+#ifdef USE_MOCKED_CALENDARSTORE
+    NSURL *taskURL = [task url];
+#else
+    NSURL *taskURL = [task URL];
+#endif
+    if (taskURL != nil)
+        elements.value = M_ATTR_STR(([NSString stringWithFormat:@"%@", taskURL]));
 
     return elements;
 }
@@ -797,7 +891,11 @@ PropertyPresentationElements *getTaskUIDPresentation(CalTask *task, CalItemPrint
     PropertyPresentationElements *elements = [PropertyPresentationElements new];
 
     elements.name = M_ATTR_STR(strConcat(localizedStr(kL10nKeyPropNameUID), @":", nil));
+#ifdef USE_MOCKED_CALENDARSTORE
     elements.value = M_ATTR_STR([task uid]);
+#else
+    elements.value = M_ATTR_STR([task calendarItemIdentifier]);
+#endif
 
     return elements;
 }
@@ -808,8 +906,13 @@ PropertyPresentationElements *getTaskDatetimePresentation(CalTask *task, CalItem
 
     elements.name = M_ATTR_STR(strConcat(localizedStr(kL10nKeyPropNameDueDate), @":", nil));
 
-    if ([task dueDate] != nil && !printOptions.singleDay)
-        elements.value = M_ATTR_STR(dateStr([task dueDate], DATE_AND_TIME));
+#ifdef USE_MOCKED_CALENDARSTORE
+    NSDate *dueDate = [task dueDate];
+#else
+    NSDate *dueDate = getTaskDueDate(task);
+#endif
+    if (dueDate != nil && !printOptions.singleDay)
+        elements.value = M_ATTR_STR(dateStr(dueDate, DATE_AND_TIME));
 
     return elements;
 }
@@ -925,11 +1028,19 @@ NSMutableAttributedString* getTaskPropStr(NSString *propName, CalTask *task, Cal
         && prettyPrintOptions.useCalendarColorsForTitles
         && ![[[elements.value attributesAtIndex:0 effectiveRange:NULL] allKeys] containsObject:NSForegroundColorAttributeName]
         )
-        [elements.value
-            addAttribute:NSForegroundColorAttributeName
-            value:getClosestAnsiColorForColor([[task calendar] color], YES)
-            range:NSMakeRange(0, [elements.value length])
-            ];
+    {
+#ifdef USE_MOCKED_CALENDARSTORE
+        NSColor *taskCalColor = [[task calendar] color];
+#else
+        NSColor *taskCalColor = getCalendarColor([task calendar]);
+#endif
+        if (taskCalColor != nil)
+            [elements.value
+                addAttribute:NSForegroundColorAttributeName
+                value:getClosestAnsiColorForColor(taskCalColor, YES)
+                range:NSMakeRange(0, [elements.value length])
+                ];
+    }
 
     if (elements.valueSuffix != nil)
         [elements.value appendAttributedString:elements.valueSuffix];
@@ -973,8 +1084,13 @@ void printCalTask(CalTask *task, CalItemPrintOption printOptions)
         NSMutableAttributedString *prefixStr;
         if (numPrintedProps == 0)
         {
-            BOOL useAlertBullet =   ([task dueDate] != nil &&
-                                     [now compare:[task dueDate]] == NSOrderedDescending);
+#ifdef USE_MOCKED_CALENDARSTORE
+            NSDate *taskDueDate = [task dueDate];
+#else
+            NSDate *taskDueDate = getTaskDueDate(task);
+#endif
+            BOOL useAlertBullet = (taskDueDate != nil &&
+                                   [now compare:taskDueDate] == NSOrderedDescending);
             prefixStr = mutableAttrStrWithAttrs(
                 ((useAlertBullet)?prettyPrintOptions.prefixStrBulletAlert:prettyPrintOptions.prefixStrBullet),
                 getBulletStringAttributes(useAlertBullet, task)
@@ -1060,14 +1176,21 @@ void printItemSections(NSArray *sections, CalItemPrintOption printOptions)
             && prettyPrintOptions.useCalendarColorsForTitles
             && ![[[thisOutput attributesAtIndex:0 effectiveRange:NULL] allKeys] containsObject:NSForegroundColorAttributeName]
             && section.items != nil && [section.items count] > 0
-            && [[((CalCalendarItem *)[section.items objectAtIndex:0]) calendar] color] != nil
             )
         {
-            [thisOutput
-                addAttribute:NSForegroundColorAttributeName
-                value:getClosestAnsiColorForColor([[((CalCalendarItem *)[section.items objectAtIndex:0]) calendar] color], YES)
-                range:NSMakeRange(0, [thisOutput length])
-                ];
+#ifdef USE_MOCKED_CALENDARSTORE
+            NSColor *sectionColor = [[((CalCalendarItem *)[section.items objectAtIndex:0]) calendar] color];
+#else
+            NSColor *sectionColor = getCalendarColor([((EKCalendarItem *)[section.items objectAtIndex:0]) calendar]);
+#endif
+            if (sectionColor != nil)
+            {
+                [thisOutput
+                    addAttribute:NSForegroundColorAttributeName
+                    value:getClosestAnsiColorForColor(sectionColor, YES)
+                    range:NSMakeRange(0, [thisOutput length])
+                    ];
+            }
         }
 
         ADD_TO_OUTPUT_BUFFER(thisOutput);
@@ -1089,6 +1212,7 @@ void printItemSections(NSArray *sections, CalItemPrintOption printOptions)
         }
 
         // print items in section
+#ifdef USE_MOCKED_CALENDARSTORE
         for (CalCalendarItem *item in section.items)
         {
             if ([item isKindOfClass:[CalEvent class]])
@@ -1101,6 +1225,20 @@ void printItemSections(NSArray *sections, CalItemPrintOption printOptions)
             else if ([item isKindOfClass:[CalTask class]])
                 printCalTask((CalTask*)item, printOptions);
         }
+#else
+        for (EKCalendarItem *item in section.items)
+        {
+            if ([item isKindOfClass:[EKEvent class]])
+            {
+                NSDate *contextDay = section.eventsContextDay;
+                if (contextDay == nil)
+                    contextDay = now;
+                printCalEvent((EKEvent*)item, printOptions, contextDay);
+            }
+            else if ([item isKindOfClass:[EKReminder class]])
+                printCalTask((EKReminder*)item, printOptions);
+        }
+#endif
     }
 }
 
@@ -1110,17 +1248,32 @@ void printAllCalendars(AppOptions *opts)
 {
     NSArray *calendars = getCalendars(opts);
 
+#ifdef USE_MOCKED_CALENDARSTORE
     for (CalCalendar *cal in calendars)
     {
         ADD_TO_OUTPUT_BUFFER(ATTR_STR(@"• "));
         NSMutableAttributedString *calendarName = M_ATTR_STR([cal title]);
-	if([cal color] != nil)
-	        [calendarName addAttribute:NSForegroundColorAttributeName value:[cal color] range:NSMakeRange(0, [calendarName length])];
+        if([cal color] != nil)
+            [calendarName addAttribute:NSForegroundColorAttributeName value:[cal color] range:NSMakeRange(0, [calendarName length])];
         ADD_TO_OUTPUT_BUFFER(calendarName);
         ADD_TO_OUTPUT_BUFFER(ATTR_STR(@"\n"));
         ADD_TO_OUTPUT_BUFFER(ATTR_STR(([NSString stringWithFormat:@"  type: %@\n", [cal type]])));
         ADD_TO_OUTPUT_BUFFER(ATTR_STR(([NSString stringWithFormat:@"  UID: %@\n", [cal uid]])));
     }
+#else
+    for (EKCalendar *cal in calendars)
+    {
+        ADD_TO_OUTPUT_BUFFER(ATTR_STR(@"• "));
+        NSMutableAttributedString *calendarName = M_ATTR_STR([cal title]);
+        NSColor *calColor = getCalendarColor(cal);
+        if(calColor != nil)
+            [calendarName addAttribute:NSForegroundColorAttributeName value:calColor range:NSMakeRange(0, [calendarName length])];
+        ADD_TO_OUTPUT_BUFFER(calendarName);
+        ADD_TO_OUTPUT_BUFFER(ATTR_STR(@"\n"));
+        ADD_TO_OUTPUT_BUFFER(ATTR_STR(([NSString stringWithFormat:@"  type: %@\n", getCalendarTypeString(cal)])));
+        ADD_TO_OUTPUT_BUFFER(ATTR_STR(([NSString stringWithFormat:@"  UID: %@\n", [cal calendarIdentifier]])));
+    }
+#endif
 }
 
 void flushOutputBuffer(NSMutableAttributedString *buffer, AppOptions *opts, NSDictionary *formattedKeywords)

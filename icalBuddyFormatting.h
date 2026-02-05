@@ -29,7 +29,7 @@ THE SOFTWARE.
 
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
-#import <CalendarStore/CalendarStore.h>
+#import "calendarStoreImport.h"
 
 void initFormatting(NSDictionary *aFormattingConfigDict, NSArray *aPropertySeparators);
 

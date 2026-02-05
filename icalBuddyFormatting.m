@@ -34,6 +34,23 @@ THE SOFTWARE.
 #import "icalBuddyL10N.h"
 #import "ANSIEscapeHelper.h"
 
+#ifndef USE_MOCKED_CALENDARSTORE
+// Helper to get calendar color as NSColor (EventKit returns CGColor)
+static NSColor* getCalendarColor(EKCalendar *calendar)
+{
+    if (calendar == nil)
+        return nil;
+    if (@available(macOS 10.15, *)) {
+        CGColorRef cgColor = [calendar CGColor];
+        if (cgColor == NULL)
+            return nil;
+        return [NSColor colorWithCGColor:cgColor];
+    }
+    // Fallback for older macOS: no color support
+    return nil;
+}
+#endif
+
 
 // default version of the formatting styles dictionary
 // that normally is under the "formatting" key in
@@ -223,7 +240,15 @@ NSMutableDictionary* formattingConfigToStringAttributes(NSString *formattingConf
             else if ([part hasSuffix:kFormatColorCyan])
                 thisColorSGRCode = SGRCodeFgCyan;
             else if ([part hasSuffix:kFormatColorCalendarColor] && calItem != nil)
+            {
+#ifdef USE_MOCKED_CALENDARSTORE
                 thisColorSGRCode = [ansiEscapeHelper closestSGRCodeForColor:[[calItem calendar] color] isForegroundColor:YES];
+#else
+                NSColor *calColor = getCalendarColor([calItem calendar]);
+                if (calColor != nil)
+                    thisColorSGRCode = [ansiEscapeHelper closestSGRCodeForColor:calColor isForegroundColor:YES];
+#endif
+            }
 
             if (thisColorSGRCode != SGRCodeNoneOrInvalid)
             {

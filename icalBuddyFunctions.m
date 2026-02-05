@@ -43,6 +43,10 @@ THE SOFTWARE.
 NSDate *now;
 NSDate *today;
 
+#ifndef USE_MOCKED_CALENDARSTORE
+// Declare external reminders access function
+extern BOOL initReminderAccess(void);
+#endif
 
 
 
@@ -122,13 +126,23 @@ NSArray *getEvents(AppOptions *opts, NSArray *calendars)
     DebugPrintf(@"effective query start date: %@\n", opts->startDate);
     DebugPrintf(@"effective query end date:   %@\n", opts->endDate);
 
-    // make predicate for getting all events between start and end dates + use it to get the events
+#ifdef USE_MOCKED_CALENDARSTORE
+    // Use original CalendarStore API for mock
     NSPredicate *eventsPredicate = [CALENDAR_STORE
         eventPredicateWithStartDate:opts->startDate
         endDate:opts->endDate
         calendars:calendars
         ];
     NSArray *ret = [[CALENDAR_STORE defaultCalendarStore] eventsWithPredicate:eventsPredicate];
+#else
+    // Use EventKit API
+    NSPredicate *eventsPredicate = [eventStore
+        predicateForEventsWithStartDate:opts->startDate
+        endDate:opts->endDate
+        calendars:calendars
+        ];
+    NSArray *ret = [eventStore eventsMatchingPredicate:eventsPredicate];
+#endif
 
     // filter results
     if (opts->excludeAllDayEvents)
@@ -140,6 +154,7 @@ NSArray *getEvents(AppOptions *opts, NSArray *calendars)
 
 NSArray *getTasks(AppOptions *opts, NSArray *calendars)
 {
+#ifdef USE_MOCKED_CALENDARSTORE
     NSPredicate *tasksPredicate = nil;
 
     if (opts->output_is_tasksDueBefore)
@@ -176,6 +191,94 @@ NSArray *getTasks(AppOptions *opts, NSArray *calendars)
         return nil;
 
     return [[CALENDAR_STORE defaultCalendarStore] tasksWithPredicate:tasksPredicate];
+#else
+    // EventKit uses EKReminder for tasks
+    // First ensure we have reminders access
+    if (!initReminderAccess()) {
+        PrintfErr(@"error: Reminders access denied.\n");
+        return nil;
+    }
+
+    // Get reminder calendars
+    NSArray *reminderCalendars = [eventStore calendarsForEntityType:EKEntityTypeReminder];
+
+    // Filter to match requested calendars by title
+    if (calendars != nil && [calendars count] > 0) {
+        NSMutableArray *calendarTitles = [NSMutableArray array];
+        for (EKCalendar *cal in calendars) {
+            [calendarTitles addObject:[cal title]];
+        }
+        NSMutableArray *filteredReminderCals = [NSMutableArray array];
+        for (EKCalendar *reminderCal in reminderCalendars) {
+            if ([calendarTitles containsObject:[reminderCal title]]) {
+                [filteredReminderCals addObject:reminderCal];
+            }
+        }
+        if ([filteredReminderCals count] > 0) {
+            reminderCalendars = filteredReminderCals;
+        }
+    }
+
+    NSPredicate *remindersPredicate = nil;
+
+    if (opts->output_is_tasksDueBefore)
+    {
+        NSDate *dueBeforeDate = nil;
+
+        NSString *dueBeforeDateStr = [opts->output substringFromIndex:15];
+        dueBeforeDate = dateFromUserInput(dueBeforeDateStr, @"due date", NO);
+
+        if (dueBeforeDate == nil)
+        {
+            PrintfErr(@"\n");
+            printDateFormatInfo();
+            return nil;
+        }
+
+        opts->dueBeforeDate = dueBeforeDate;
+        DebugPrintf(@"effective query 'due before' date: %@\n", dueBeforeDate);
+
+        // Get incomplete reminders with due date before specified date
+        remindersPredicate = [eventStore predicateForIncompleteRemindersWithDueDateStarting:nil
+                                                                                     ending:dueBeforeDate
+                                                                                  calendars:reminderCalendars];
+    }
+    else if (opts->output_is_uncompletedTasks)
+    {
+        // Get all incomplete reminders
+        remindersPredicate = [eventStore predicateForIncompleteRemindersWithDueDateStarting:nil
+                                                                                     ending:nil
+                                                                                  calendars:reminderCalendars];
+    }
+    else if (opts->output_is_undatedUncompletedTasks)
+    {
+        // Get incomplete reminders and filter for those without due date
+        remindersPredicate = [eventStore predicateForIncompleteRemindersWithDueDateStarting:nil
+                                                                                     ending:nil
+                                                                                  calendars:reminderCalendars];
+    }
+    else
+        return nil;
+
+    // Fetch reminders synchronously
+    __block NSArray *reminders = nil;
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+
+    [eventStore fetchRemindersMatchingPredicate:remindersPredicate completion:^(NSArray *fetchedReminders) {
+        reminders = fetchedReminders;
+        dispatch_semaphore_signal(semaphore);
+    }];
+
+    dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+
+    // For undated tasks, filter out those with due dates
+    if (opts->output_is_undatedUncompletedTasks && reminders != nil) {
+        reminders = [reminders filteredArrayUsingPredicate:
+                [NSPredicate predicateWithFormat:@"dueDateComponents == nil"]];
+    }
+
+    return reminders;
+#endif
 }
 
 
@@ -206,6 +309,7 @@ NSArray *getCalItems(AppOptions *opts)
 // - sort numerically by priority except treat CalPriorityNone (0) as a special case
 // - if priorities match, sort tasks that are late from their due date to be first and then
 //   order alphabetically by title
+#ifdef USE_MOCKED_CALENDARSTORE
 NSInteger prioritySort(CalTask *task1, CalTask *task2, void *context)
 {
     if ([task1 priority] < [task2 priority])
@@ -243,6 +347,55 @@ NSInteger prioritySort(CalTask *task1, CalTask *task2, void *context)
         return [[task1 title] compare:[task2 title]];
     }
 }
+#else
+NSInteger prioritySort(EKReminder *task1, EKReminder *task2, void *context)
+{
+    NSUInteger priority1 = [task1 priority];
+    NSUInteger priority2 = [task2 priority];
+
+    if (priority1 < priority2)
+    {
+        if (priority1 == CalPriorityNone)
+            return NSOrderedDescending;
+        else
+            return NSOrderedAscending;
+    }
+    else if (priority1 > priority2)
+        if (priority2 == CalPriorityNone)
+            return NSOrderedAscending;
+        else
+            return NSOrderedDescending;
+    else
+    {
+        // check if one task is late and the other is not
+        BOOL task1late = NO;
+        BOOL task2late = NO;
+
+        NSDate *dueDate1 = nil;
+        NSDate *dueDate2 = nil;
+
+        if ([task1 dueDateComponents] != nil) {
+            dueDate1 = [[NSCalendar currentCalendar] dateFromComponents:[task1 dueDateComponents]];
+        }
+        if ([task2 dueDateComponents] != nil) {
+            dueDate2 = [[NSCalendar currentCalendar] dateFromComponents:[task2 dueDateComponents]];
+        }
+
+        if (dueDate1 != nil && [now compare:dueDate1] == NSOrderedDescending)
+            task1late = YES;
+        if (dueDate2 != nil && [now compare:dueDate2] == NSOrderedDescending)
+            task2late = YES;
+
+        if (task1late && !task2late)
+            return NSOrderedAscending;
+        else if (task2late && !task1late)
+            return NSOrderedDescending;
+
+        // neither task is, or both tasks are late -> order alphabetically by title
+        return [[task1 title] compare:[task2 title]];
+    }
+}
+#endif
 
 
 
@@ -256,6 +409,7 @@ NSArray *sortCalItems(AppOptions *opts, NSArray *calItems)
     {
         if (opts->sortTasksByDueDate || opts->sortTasksByDueDateAscending)
         {
+#ifdef USE_MOCKED_CALENDARSTORE
             retCalItems = [calItems
                 sortedArrayUsingDescriptors:[NSArray
                     arrayWithObjects:
@@ -279,6 +433,31 @@ NSArray *sortCalItems(AppOptions *opts, NSArray *calItems)
                     ];
                 retCalItems = [retCalItems arrayByAddingObjectsFromArray:tasksWithNoDueDate];
             }
+#else
+            // EventKit uses dueDateComponents instead of dueDate
+            retCalItems = [calItems
+                sortedArrayUsingDescriptors:[NSArray
+                    arrayWithObjects:
+                        [[[NSSortDescriptor alloc] initWithKey:@"dueDateComponents" ascending:opts->sortTasksByDueDateAscending] autorelease],
+                        nil
+                    ]
+                ];
+
+            if (opts->sortTasksByDueDateAscending)
+            {
+                NSArray *tasksWithNoDueDate = [retCalItems
+                    filteredArrayUsingPredicate:[NSPredicate
+                        predicateWithFormat:@"dueDateComponents == nil"
+                        ]
+                    ];
+                retCalItems = [retCalItems
+                    filteredArrayUsingPredicate:[NSPredicate
+                        predicateWithFormat:@"dueDateComponents != nil"
+                        ]
+                    ];
+                retCalItems = [retCalItems arrayByAddingObjectsFromArray:tasksWithNoDueDate];
+            }
+#endif
         }
         else
             retCalItems = [calItems sortedArrayUsingFunction:prioritySort context:NULL];
@@ -351,6 +530,7 @@ NSArray *putItemsUnderSections(AppOptions *opts, NSArray *calItems)
         NSArray *calendars = getCalendars(opts);
         sections = [NSMutableArray arrayWithCapacity:[calendars count]];
 
+#ifdef USE_MOCKED_CALENDARSTORE
         for (CalCalendar *cal in calendars)
         {
             NSMutableArray *thisCalendarItems = [NSMutableArray arrayWithCapacity:((printingEvents)?[calItems count]:[calItems count])];
@@ -368,6 +548,26 @@ NSArray *putItemsUnderSections(AppOptions *opts, NSArray *calItems)
                 [sections addObject:SECTION_TO_NSVALUE(section)];
             }
         }
+#else
+        for (EKCalendar *cal in calendars)
+        {
+            NSMutableArray *thisCalendarItems = [NSMutableArray arrayWithCapacity:[calItems count]];
+
+            if (printingEvents)
+                [thisCalendarItems addObjectsFromArray:calItems];
+            else if (printingTasks)
+                [thisCalendarItems addObjectsFromArray:calItems];
+
+            // EventKit uses calendarIdentifier instead of uid
+            [thisCalendarItems filterUsingPredicate:[NSPredicate predicateWithFormat:@"calendar.calendarIdentifier == %@", [cal calendarIdentifier]]];
+
+            if (thisCalendarItems != nil && [thisCalendarItems count] > 0)
+            {
+                PrintSection section = {[cal title], thisCalendarItems, nil};
+                [sections addObject:SECTION_TO_NSVALUE(section)];
+            }
+        }
+#endif
     }
     else if (opts->separateByDate)
     {
@@ -379,7 +579,11 @@ NSArray *putItemsUnderSections(AppOptions *opts, NSArray *calItems)
         {
             // fill allDays using event start dates' days and all spanned days thereafter
             // if the event spans multiple days
+#ifdef USE_MOCKED_CALENDARSTORE
             for (CalEvent *anEvent in calItems)
+#else
+            for (EKEvent *anEvent in calItems)
+#endif
             {
                 // calculate anEvent's days span and limit it to the range of days we
                 // want displayed
@@ -436,6 +640,7 @@ NSArray *putItemsUnderSections(AppOptions *opts, NSArray *calItems)
         else if (printingTasks)
         {
             // fill allDays using task due dates' days
+#ifdef USE_MOCKED_CALENDARSTORE
             for (CalTask *aTask in calItems)
             {
                 id thisDayKey = nil;
@@ -455,7 +660,27 @@ NSArray *putItemsUnderSections(AppOptions *opts, NSArray *calItems)
                 NSCAssert((thisDayTasks != nil), @"thisDayTasks is nil");
                 [thisDayTasks addObject:aTask];
             }
+#else
+            for (EKReminder *aTask in calItems)
+            {
+                id thisDayKey = nil;
+                if ([aTask dueDateComponents] != nil)
+                {
+                    NSDate *thisTaskDueDate = [[NSCalendar currentCalendar] dateFromComponents:[aTask dueDateComponents]];
+                    NSDate *thisDueDay = dateForStartOfDay(thisTaskDueDate);
+                    thisDayKey = thisDueDay;
+                }
+                else
+                    thisDayKey = [NSNull null];
 
+                if (![[allDays allKeys] containsObject:thisDayKey])
+                    [allDays setObject:[NSMutableArray arrayWithCapacity:20] forKey:thisDayKey];
+
+                NSMutableArray *thisDayTasks = [allDays objectForKey:thisDayKey];
+                NSCAssert((thisDayTasks != nil), @"thisDayTasks is nil");
+                [thisDayTasks addObject:aTask];
+            }
+#endif
         }
 
         sections = [NSMutableArray arrayWithCapacity:[calItems count]];
@@ -544,11 +769,19 @@ NSArray *putItemsUnderSections(AppOptions *opts, NSArray *calItems)
         {
             CalPriority priority = priorities[i];
             NSMutableArray *thisCalendarItems = [NSMutableArray arrayWithCapacity:[calItems count]];
+#ifdef USE_MOCKED_CALENDARSTORE
             for (CalTask *aTask in calItems)
             {
                 if ([aTask priority] == priority)
                     [thisCalendarItems addObject:aTask];
             }
+#else
+            for (EKReminder *aTask in calItems)
+            {
+                if ([aTask priority] == priority)
+                    [thisCalendarItems addObject:aTask];
+            }
+#endif
             if (0 < [thisCalendarItems count])
             {
                 PrintSection section = {localizedPriorityTitle(priority), thisCalendarItems, nil};
@@ -564,12 +797,21 @@ NSArray *putItemsUnderSections(AppOptions *opts, NSArray *calItems)
 
 void filterCalendarsByNameOrUID(NSMutableArray *cals, AppOptions *opts)
 {
+#ifdef USE_MOCKED_CALENDARSTORE
     if (opts->includeCals != nil)
         [cals filterUsingPredicate:[NSPredicate predicateWithFormat:@"(uid IN %@) OR (title IN %@)", opts->includeCals, opts->includeCals]];
     if (opts->excludeCals != nil)
         [cals filterUsingPredicate:[NSPredicate predicateWithFormat:@"(NOT(uid IN %@)) AND (NOT(title IN %@))", opts->excludeCals, opts->excludeCals]];
+#else
+    // EventKit uses calendarIdentifier instead of uid
+    if (opts->includeCals != nil)
+        [cals filterUsingPredicate:[NSPredicate predicateWithFormat:@"(calendarIdentifier IN %@) OR (title IN %@)", opts->includeCals, opts->includeCals]];
+    if (opts->excludeCals != nil)
+        [cals filterUsingPredicate:[NSPredicate predicateWithFormat:@"(NOT(calendarIdentifier IN %@)) AND (NOT(title IN %@))", opts->excludeCals, opts->excludeCals]];
+#endif
 }
 
+#ifdef USE_MOCKED_CALENDARSTORE
 NSArray *getCalendarStoreCalTypeValuesForUserProvidedValues(NSArray *userProvidedCalTypes)
 {
     NSMutableArray *ret = [NSMutableArray arrayWithCapacity:[userProvidedCalTypes count]];
@@ -606,6 +848,43 @@ void filterCalendarsByType(NSMutableArray *cals, AppOptions *opts)
         [cals filterUsingPredicate:[NSPredicate predicateWithFormat:@"NOT(type IN %@)", excludeActualCalTypes]];
     }
 }
+#else
+// EventKit calendar type filtering
+NSArray *getEventKitCalTypeValuesForUserProvidedValues(NSArray *userProvidedCalTypes)
+{
+    NSMutableArray *ret = [NSMutableArray arrayWithCapacity:[userProvidedCalTypes count]];
+    for (NSString *userProvidedType in userProvidedCalTypes)
+    {
+        if ([userProvidedType caseInsensitiveCompare:kCalendarTypeBirthday] == NSOrderedSame)
+            [ret addObject:@(EKCalendarTypeBirthday)];
+        else if ([userProvidedType caseInsensitiveCompare:kCalendarTypeCalDAV] == NSOrderedSame)
+            [ret addObject:@(EKCalendarTypeCalDAV)];
+        else if ([userProvidedType caseInsensitiveCompare:kCalendarTypeiCloud] == NSOrderedSame)
+            [ret addObject:@(EKCalendarTypeCalDAV)];
+        else if ([userProvidedType caseInsensitiveCompare:kCalendarTypeExchange] == NSOrderedSame)
+            [ret addObject:@(EKCalendarTypeExchange)];
+        else if ([userProvidedType caseInsensitiveCompare:kCalendarTypeLocal] == NSOrderedSame)
+            [ret addObject:@(EKCalendarTypeLocal)];
+        else if ([userProvidedType caseInsensitiveCompare:kCalendarTypeSubscription] == NSOrderedSame)
+            [ret addObject:@(EKCalendarTypeSubscription)];
+    }
+    return ret;
+}
+
+void filterCalendarsByType(NSMutableArray *cals, AppOptions *opts)
+{
+    if (opts->includeCalTypes != nil)
+    {
+        NSArray *includeActualCalTypes = getEventKitCalTypeValuesForUserProvidedValues(opts->includeCalTypes);
+        [cals filterUsingPredicate:[NSPredicate predicateWithFormat:@"type IN %@", includeActualCalTypes]];
+    }
+    if (opts->excludeCalTypes != nil)
+    {
+        NSArray *excludeActualCalTypes = getEventKitCalTypeValuesForUserProvidedValues(opts->excludeCalTypes);
+        [cals filterUsingPredicate:[NSPredicate predicateWithFormat:@"NOT(type IN %@)", excludeActualCalTypes]];
+    }
+}
+#endif
 
 void filterCalendars(NSMutableArray *cals, AppOptions *opts)
 {
@@ -624,7 +903,15 @@ void filterCalendars(NSMutableArray *cals, AppOptions *opts)
 
 NSArray *getCalendars(AppOptions *opts)
 {
+#ifdef USE_MOCKED_CALENDARSTORE
     NSMutableArray *calendars = [[[[[[CALENDAR_STORE alloc] init] autorelease] calendars] mutableCopy] autorelease];
+#else
+    // Initialize event store if needed
+    if (!initEventStore()) {
+        return [NSArray array];
+    }
+    NSMutableArray *calendars = [[[eventStore calendarsForEntityType:EKEntityTypeEvent] mutableCopy] autorelease];
+#endif
     filterCalendars(calendars, opts);
     return calendars;
 }
@@ -739,5 +1026,4 @@ void openConfigFileInEditor(NSString *configFilePath, BOOL openInCLIEditor)
         }
     }
 }
-
 

@@ -24,9 +24,9 @@ COMPILER_GCC=gcc
 COMPILER_CLANG=clang
 COMPILER=$(COMPILER_CLANG)
 
-CC_WARN_OPTS=-Wall -Wextra -Wno-unused-parameter -Werror
+CC_WARN_OPTS=-Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations
 
-SOURCE_FILES=icalBuddy[ABCDEFGHIJKLMNOPQRSTUVWXYZ]*.m ANSIEscapeHelper.m HG*.m IcalBuddy*.m *+HGAdditions.m
+SOURCE_FILES=icalBuddy[ABCDEFGHIJKLMNOPQRSTUVWXYZ]*.m ANSIEscapeHelper.m HG*.m IcalBuddy*.m *+HGAdditions.m EventKitStore.m
 
 
 
@@ -42,7 +42,7 @@ icalBuddy: $(SOURCE_FILES) icalBuddy.m
 	@echo
 	@echo ---- Compiling main app:
 	@echo ======================================
-	$(COMPILER) $(ARG_DEBUG) -O3 $(CC_WARN_OPTS) -std=c99 -force_cpusubtype_ALL -mmacosx-version-min=10.5  -arch x86_64 -framework Cocoa -framework CalendarStore -framework AppKit -framework AddressBook -o $@ icalBuddy.m $(SOURCE_FILES)
+	$(COMPILER) $(ARG_DEBUG) -O3 $(CC_WARN_OPTS) -std=c99 -mmacosx-version-min=10.13 -framework Cocoa -framework EventKit -framework AppKit -framework AddressBook -o $@ icalBuddy.m $(SOURCE_FILES)
 
 
 

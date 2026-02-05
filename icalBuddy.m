@@ -185,6 +185,7 @@ int main(int argc, char *argv[])
         }
         else
         {
+    #ifdef USE_MOCKED_CALENDARSTORE
             for (CalCalendarItem *item in calItems)
             {
                 if ([item isKindOfClass:[CalEvent class]])
@@ -192,6 +193,15 @@ int main(int argc, char *argv[])
                 else
                     printCalTask((CalTask *)item, printOptions);
             }
+#else
+            for (EKCalendarItem *item in calItems)
+            {
+                if ([item isKindOfClass:[EKEvent class]])
+                    printCalEvent((EKEvent *)item, printOptions, now);
+                else
+                    printCalTask((EKReminder *)item, printOptions);
+            }
+#endif
         }
     }
     // ------------------------------------------------------------------
