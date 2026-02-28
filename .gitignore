@@ -36,3 +36,16 @@ tests/regression/*.log
 # other
 deploymentScpTarget
 .hg*
+
+# BEGIN CREDENTIAL HARDENING (managed)
+.env
+.env.*
+!.env.example
+.credentials/
+credentials.json
+client_secret*.json
+token*.json
+*.pem
+*.p12
+*.key
+# END CREDENTIAL HARDENING (managed)
